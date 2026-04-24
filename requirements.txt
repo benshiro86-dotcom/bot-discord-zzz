@@ -1,0 +1,5 @@
+discord.py
+pillow
+pytesseract
+opencv-python
+requests
