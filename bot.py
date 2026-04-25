@@ -5,12 +5,10 @@ import pytesseract
 from PIL import Image
 import requests
 from io import BytesIO
-import re
 import os
 import asyncio
 import time
 import logging
-import aiohttp
 
 # =========================
 # LOGGING
@@ -21,9 +19,6 @@ logging.getLogger("discord").setLevel(logging.WARNING)
 # GLOBALS (ANTI 429)
 # =========================
 global_lock = asyncio.Lock()
-discord_api_lock = asyncio.Lock()
-
-user_cache = {}
 cooldowns = {}
 
 PITY_MAX = 80
@@ -94,7 +89,7 @@ def update_user(user_id, force_s=False, force_a=False):
     conn.commit()
 
 # =========================
-# SAFE REQUEST (ANTI CRASH)
+# SAFE REQUEST
 # =========================
 def safe_request(url):
     try:
@@ -106,14 +101,13 @@ def safe_request(url):
 # OCR
 # =========================
 def analyze_image(url):
-    try:
-        r = safe_request(url)
-        if not r:
-            return {"rarity":"Unknown","character":"Unknown","s":False,"a":False}
+    r = safe_request(url)
+    if not r:
+        return {"rarity":"Unknown","character":"Unknown","s":False,"a":False}
 
+    try:
         img = Image.open(BytesIO(r.content))
         text = pytesseract.image_to_string(img).lower()
-
     except:
         return {"rarity":"Unknown","character":"Unknown","s":False,"a":False}
 
@@ -141,21 +135,7 @@ def analyze_image(url):
     return result
 
 # =========================
-# SAFE FETCH USER (ANTI 429 FIX)
-# =========================
-async def safe_fetch_user(user_id):
-    if user_id in user_cache:
-        return user_cache[user_id]
-
-    async with discord_api_lock:
-        user = await bot.fetch_user(int(user_id))
-        await asyncio.sleep(0.3)  # anti rate limit
-
-    user_cache[user_id] = user
-    return user
-
-# =========================
-# READY EVENT
+# READY
 # =========================
 @bot.event
 async def on_ready():
@@ -175,7 +155,6 @@ async def pull(ctx):
         user_id = str(ctx.author.id)
         now = time.time()
 
-        # COOLDOWN
         if user_id in cooldowns:
             if now - cooldowns[user_id] < COOLDOWN_SECONDS:
                 await ctx.send("⏳ Cooldown active")
@@ -183,7 +162,6 @@ async def pull(ctx):
 
         cooldowns[user_id] = now
 
-        # DELETE USER MESSAGE
         try:
             await ctx.message.delete()
         except:
@@ -227,10 +205,9 @@ async def pull(ctx):
         embed.add_field(name="Pity", value=stats[3], inline=True)
 
         await msg.edit(content=None, embed=embed)
-        await asyncio.sleep(0.5)
 
 # =========================
-# LEADERBOARD (ANTI 429 FIX)
+# LEADERBOARD (SAFE VERSION - NO 429)
 # =========================
 @bot.command()
 async def leaderboard(ctx):
@@ -241,18 +218,16 @@ async def leaderboard(ctx):
     embed = discord.Embed(title="🏆 Leaderboard", color=0xffd700)
 
     for i, row in enumerate(rows):
-        user = await safe_fetch_user(row[0])
         embed.add_field(
-            name=f"#{i+1} {user.name}",
+            name=f"#{i+1} User {row[0]}",
             value=f"{row[1]} S-Ranks",
             inline=False
         )
-        await asyncio.sleep(0.3)
 
     await ctx.send(embed=embed)
 
 # =========================
-# PITY COMMAND
+# PITY
 # =========================
 @bot.command()
 async def pity(ctx):
@@ -268,7 +243,7 @@ async def pity(ctx):
     await ctx.send(embed=embed)
 
 # =========================
-# START BOT (SAFE RENDER)
+# START BOT
 # =========================
 token = os.getenv("DISCORD_TOKEN")
 
