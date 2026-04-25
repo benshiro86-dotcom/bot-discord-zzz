@@ -1,9 +1,8 @@
 import discord
 from discord.ext import commands
 import sqlite3
-import pytesseract
-from PIL import Image
 import requests
+from PIL import Image
 from io import BytesIO
 import os
 import asyncio
@@ -16,7 +15,7 @@ import logging
 logging.getLogger("discord").setLevel(logging.WARNING)
 
 # =========================
-# GLOBALS (ANTI 429)
+# GLOBALS
 # =========================
 global_lock = asyncio.Lock()
 cooldowns = {}
@@ -30,12 +29,12 @@ COOLDOWN_SECONDS = 10
 intents = discord.Intents.default()
 intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents, reconnect=True)
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 # =========================
-# DATABASE
+# SQLITE SAFE (DOCKER + RENDER)
 # =========================
-conn = sqlite3.connect("database.db")
+conn = sqlite3.connect("database.db", check_same_thread=False)
 c = conn.cursor()
 
 c.execute("""
@@ -93,12 +92,15 @@ def update_user(user_id, force_s=False, force_a=False):
 # =========================
 def safe_request(url):
     try:
-        return requests.get(url, timeout=10)
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            return r
+        return None
     except:
         return None
 
 # =========================
-# OCR
+# OCR SAFE (DOCKER FRIENDLY)
 # =========================
 def analyze_image(url):
     r = safe_request(url)
@@ -106,10 +108,22 @@ def analyze_image(url):
         return {"rarity":"Unknown","character":"Unknown","s":False,"a":False}
 
     try:
-        img = Image.open(BytesIO(r.content))
-        text = pytesseract.image_to_string(img).lower()
+        img = Image.open(BytesIO(r.content)).convert("RGB")
     except:
         return {"rarity":"Unknown","character":"Unknown","s":False,"a":False}
+
+    # OCR SAFE IMPORT (IMPORTANT FOR DOCKER)
+    try:
+        import pytesseract
+        text = pytesseract.image_to_string(img).lower()
+    except Exception as e:
+        print("OCR ERROR:", e)
+        return {
+            "rarity":"OCR unavailable",
+            "character":"Unknown",
+            "s":False,
+            "a":False
+        }
 
     result = {
         "rarity": "Unknown",
@@ -135,13 +149,10 @@ def analyze_image(url):
     return result
 
 # =========================
-# READY
+# READY EVENT
 # =========================
 @bot.event
 async def on_ready():
-    if getattr(bot, "started", False):
-        return
-    bot.started = True
     print(f"Bot online as {bot.user}")
 
 # =========================
@@ -175,7 +186,7 @@ async def pull(ctx):
 
         msg = await ctx.send("🎰 Pulling...")
         await asyncio.sleep(1)
-        await msg.edit(content="✨ Summoning...")
+        await msg.edit(content="✨ Analyzing image...")
         await asyncio.sleep(1)
 
         data = analyze_image(img.url)
@@ -207,7 +218,7 @@ async def pull(ctx):
         await msg.edit(content=None, embed=embed)
 
 # =========================
-# LEADERBOARD (SAFE VERSION - NO 429)
+# LEADERBOARD
 # =========================
 @bot.command()
 async def leaderboard(ctx):
@@ -219,8 +230,8 @@ async def leaderboard(ctx):
 
     for i, row in enumerate(rows):
         embed.add_field(
-            name=f"#{i+1} User {row[0]}",
-            value=f"{row[1]} S-Ranks",
+            name=f"#{i+1}",
+            value=f"<@{row[0]}> — {row[1]} S-Ranks",
             inline=False
         )
 
