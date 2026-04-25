@@ -13,20 +13,21 @@ import logging
 import aiohttp
 
 # =========================
-# LOGGING SAFE (Render debug)
+# LOGGING
 # =========================
 logging.getLogger("discord").setLevel(logging.WARNING)
 
 # =========================
-# GLOBALS (ANTI 429 + STABILITY)
+# GLOBALS (ANTI 429)
 # =========================
 global_lock = asyncio.Lock()
+discord_api_lock = asyncio.Lock()
+
 user_cache = {}
-session = None
+cooldowns = {}
 
 PITY_MAX = 80
 COOLDOWN_SECONDS = 10
-cooldowns = {}
 
 # =========================
 # DISCORD SETUP
@@ -34,11 +35,7 @@ cooldowns = {}
 intents = discord.Intents.default()
 intents.message_content = True
 
-bot = commands.Bot(
-    command_prefix="!",
-    intents=intents,
-    reconnect=True
-)
+bot = commands.Bot(command_prefix="!", intents=intents, reconnect=True)
 
 # =========================
 # DATABASE
@@ -78,7 +75,6 @@ def update_user(user_id, force_s=False, force_a=False):
     s_rank = user[1]
     a_rank = user[2]
 
-    # PITY SYSTEM
     if pity >= PITY_MAX:
         force_s = True
         pity = 0
@@ -98,23 +94,28 @@ def update_user(user_id, force_s=False, force_a=False):
     conn.commit()
 
 # =========================
-# OCR (SAFE FOR RENDER)
+# SAFE REQUEST (ANTI CRASH)
+# =========================
+def safe_request(url):
+    try:
+        return requests.get(url, timeout=10)
+    except:
+        return None
+
+# =========================
+# OCR
 # =========================
 def analyze_image(url):
     try:
-        img_data = requests.get(url, timeout=10).content
-        img = Image.open(BytesIO(img_data))
+        r = safe_request(url)
+        if not r:
+            return {"rarity":"Unknown","character":"Unknown","s":False,"a":False}
 
+        img = Image.open(BytesIO(r.content))
         text = pytesseract.image_to_string(img).lower()
 
-    except Exception as e:
-        print("OCR ERROR:", e)
-        return {
-            "rarity": "Unknown",
-            "character": "Unknown",
-            "s": False,
-            "a": False
-        }
+    except:
+        return {"rarity":"Unknown","character":"Unknown","s":False,"a":False}
 
     result = {
         "rarity": "Unknown",
@@ -140,62 +141,31 @@ def analyze_image(url):
     return result
 
 # =========================
-# EMBED
-# =========================
-def build_embed(ctx, data, stats):
-    embed = discord.Embed(
-        title="🎰 GACHA RESULT",
-        color=0xffcc00 if data["s"] else 0x00ccff if data["a"] else 0xaaaaaa
-    )
-
-    embed.add_field(name="Player", value=ctx.author.mention, inline=False)
-    embed.add_field(name="Rarity", value=data["rarity"], inline=True)
-    embed.add_field(name="Character", value=data["character"], inline=True)
-
-    embed.add_field(name="S-Ranks", value=stats[1], inline=True)
-    embed.add_field(name="A-Ranks", value=stats[2], inline=True)
-    embed.add_field(name="Pity", value=stats[3], inline=True)
-
-    if stats[3] >= 70:
-        embed.add_field(name="⚠️ Soft Pity", value="Increased S-Rank chance", inline=False)
-
-    if stats[3] >= PITY_MAX:
-        embed.add_field(name="🔥 GUARANTEED", value="Pity triggered!", inline=False)
-
-    return embed
-
-# =========================
-# SAFE USER CACHE
+# SAFE FETCH USER (ANTI 429 FIX)
 # =========================
 async def safe_fetch_user(user_id):
     if user_id in user_cache:
         return user_cache[user_id]
 
-    user = await bot.fetch_user(int(user_id))
+    async with discord_api_lock:
+        user = await bot.fetch_user(int(user_id))
+        await asyncio.sleep(0.3)  # anti rate limit
+
     user_cache[user_id] = user
     return user
 
 # =========================
-# READY EVENT (FIX STATUS 1 + DOUBLE START)
+# READY EVENT
 # =========================
 @bot.event
 async def on_ready():
     if getattr(bot, "started", False):
         return
-
     bot.started = True
     print(f"Bot online as {bot.user}")
 
 # =========================
-# AIOHTTP SESSION (SAFE INIT)
-# =========================
-@bot.event
-async def setup_hook():
-    global session
-    session = aiohttp.ClientSession()
-
-# =========================
-# 🎰 PULL COMMAND
+# PULL COMMAND
 # =========================
 @bot.command()
 async def pull(ctx):
@@ -208,8 +178,7 @@ async def pull(ctx):
         # COOLDOWN
         if user_id in cooldowns:
             if now - cooldowns[user_id] < COOLDOWN_SECONDS:
-                remaining = int(COOLDOWN_SECONDS - (now - cooldowns[user_id]))
-                await ctx.send(f"⏳ Wait {remaining}s")
+                await ctx.send("⏳ Cooldown active")
                 return
 
         cooldowns[user_id] = now
@@ -221,23 +190,20 @@ async def pull(ctx):
             pass
 
         if not ctx.message.attachments:
-            await ctx.send("📸 Send a screenshot with `!pull`")
+            await ctx.send("📸 Send a screenshot with !pull")
             return
 
         img = ctx.message.attachments[0]
 
-        # ANIMATION
         msg = await ctx.send("🎰 Pulling...")
         await asyncio.sleep(1)
         await msg.edit(content="✨ Summoning...")
         await asyncio.sleep(1)
 
-        # OCR
         data = analyze_image(img.url)
 
         user = get_user(ctx.author.id)
-        next_pity = user[3] + 1
-        forced_s = next_pity >= PITY_MAX
+        forced_s = (user[3] + 1) >= PITY_MAX
 
         update_user(
             ctx.author.id,
@@ -247,12 +213,24 @@ async def pull(ctx):
 
         stats = get_user(ctx.author.id)
 
-        embed = build_embed(ctx, data, stats)
+        embed = discord.Embed(
+            title="🎰 GACHA RESULT",
+            color=0xffcc00 if data["s"] else 0x00ccff if data["a"] else 0xaaaaaa
+        )
+
+        embed.add_field(name="Player", value=ctx.author.mention, inline=False)
+        embed.add_field(name="Rarity", value=data["rarity"], inline=True)
+        embed.add_field(name="Character", value=data["character"], inline=True)
+
+        embed.add_field(name="S-Ranks", value=stats[1], inline=True)
+        embed.add_field(name="A-Ranks", value=stats[2], inline=True)
+        embed.add_field(name="Pity", value=stats[3], inline=True)
 
         await msg.edit(content=None, embed=embed)
+        await asyncio.sleep(0.5)
 
 # =========================
-# LEADERBOARD
+# LEADERBOARD (ANTI 429 FIX)
 # =========================
 @bot.command()
 async def leaderboard(ctx):
@@ -264,7 +242,12 @@ async def leaderboard(ctx):
 
     for i, row in enumerate(rows):
         user = await safe_fetch_user(row[0])
-        embed.add_field(name=f"#{i+1} {user.name}", value=f"{row[1]} S-Ranks", inline=False)
+        embed.add_field(
+            name=f"#{i+1} {user.name}",
+            value=f"{row[1]} S-Ranks",
+            inline=False
+        )
+        await asyncio.sleep(0.3)
 
     await ctx.send(embed=embed)
 
@@ -285,12 +268,12 @@ async def pity(ctx):
     await ctx.send(embed=embed)
 
 # =========================
-# SAFE BOT START (FIX STATUS 1)
+# START BOT (SAFE RENDER)
 # =========================
 token = os.getenv("DISCORD_TOKEN")
 
 if not token:
-    print("ERROR: DISCORD_TOKEN is missing")
+    print("DISCORD_TOKEN missing")
     exit()
 
 bot.run(token)
